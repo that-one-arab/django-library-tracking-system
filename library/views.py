@@ -1,5 +1,7 @@
+from datetime import timedelta
 from rest_framework import viewsets, status
 from rest_framework.response import Response
+from django.db.models import Count, Q
 from .models import Author, Book, Member, Loan
 from .serializers import AuthorSerializer, BookSerializer, MemberSerializer, LoanSerializer
 from rest_framework.decorators import action
@@ -11,7 +13,7 @@ class AuthorViewSet(viewsets.ModelViewSet):
     serializer_class = AuthorSerializer
 
 class BookViewSet(viewsets.ModelViewSet):
-    queryset = Book.objects.all()
+    queryset = Book.objects.select_related('author').all()
     serializer_class = BookSerializer
 
     @action(detail=True, methods=['post'])
@@ -49,6 +51,44 @@ class MemberViewSet(viewsets.ModelViewSet):
     queryset = Member.objects.all()
     serializer_class = MemberSerializer
 
+    @action(detail=True, methods=['get'])
+    def top_active(self, request):
+        members = (
+            Member.objects.annotate(active_loans=Count('loans', filter=Q(loans__is_returned=False))).order_by('-active_loans')[:5]
+        )
+
+        data = [
+            {
+                "id": member.id,
+                "username": member.user.username,
+                'active_loans': member.active_loans
+            } for member in members
+        ]
+
+        return Response(data)
+    
+
 class LoanViewSet(viewsets.ModelViewSet):
     queryset = Loan.objects.all()
     serializer_class = LoanSerializer
+
+
+    @action(detail=True, methods=['post'])
+    def extend_due_date(self, request, pk=None):
+        try:
+            loan = self.get_object()
+        except Loan.DoesNotExist:
+            return Response({'error': 'Loan does not exist.'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if loan.is_returned:
+            return Response({'error': 'Cannot extend a returned loan.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        additional_days = int(request.data.get('days', 7))
+
+        if additional_days <= 0:
+            return Response({'error': 'Days must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        loan.due_date+=timedelta(days=additional_days)
+        loan.save()
+
+        return Response({'status': f"Due date extended by {additional_days} days.", "new_due_date": loan.due_date}, status=status.HTTP_200_OK)
